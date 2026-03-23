@@ -6,9 +6,7 @@ gerando planilha XLSX organizada com abas de Entradas e Saídas.
 import streamlit as st
 import tempfile, zipfile, os, io, time
 from pathlib import Path
-from openpyxl import Workbook
-from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
-from openpyxl.utils import get_column_letter
+
 
 # ─── LAYOUTS OFICIAIS SPED ───────────────────────────────────────────────────
 # Registro C100 — Documento Fiscal (Cód. 01, 1B, 04, 55, 65)
@@ -140,20 +138,6 @@ def extract_file_from_upload(uploaded) -> bytes:
 
 
 # ─── GERADOR XLSX ────────────────────────────────────────────────────────────
-# Cores e estilos
-HEADER_FILL_C100 = PatternFill("solid", fgColor="1F4E79")
-HEADER_FILL_C170 = PatternFill("solid", fgColor="2E75B6")
-HEADER_FONT = Font(name="Arial", bold=True, color="FFFFFF", size=10)
-DATA_FONT = Font(name="Arial", size=9)
-BORDER_THIN = Border(
-    left=Side(style="thin", color="D9D9D9"),
-    right=Side(style="thin", color="D9D9D9"),
-    top=Side(style="thin", color="D9D9D9"),
-    bottom=Side(style="thin", color="D9D9D9"),
-)
-ZEBRA_FILL = PatternFill("solid", fgColor="F2F7FB")
-ALIGN_CENTER = Alignment(horizontal="center", vertical="center")
-ALIGN_LEFT = Alignment(horizontal="left", vertical="center")
 
 
 def build_xlsx(data: dict) -> bytes:
