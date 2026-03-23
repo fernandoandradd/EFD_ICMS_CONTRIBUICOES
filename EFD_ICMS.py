@@ -3,10 +3,22 @@ EFD Extrator C100 + C170 — Entradas & Saídas
 Ferramenta para extrair registros C100 e C170 de arquivos EFD ICMS/IPI e EFD Contribuições,
 gerando planilha XLSX organizada com abas de Entradas e Saídas.
 """
+# ─── AUTO-INSTALL DE DEPENDÊNCIAS ────────────────────────────────────────────
+# Garante que pacotes necessários estão instalados, mesmo se requirements.txt falhar
+import subprocess, sys
+
+def _install(pkg):
+    try:
+        __import__(pkg)
+    except ImportError:
+        subprocess.check_call([sys.executable, "-m", "pip", "install", pkg, "--quiet"])
+
+_install("openpyxl")
+
+# ─── IMPORTS ─────────────────────────────────────────────────────────────────
 import streamlit as st
 import tempfile, zipfile, os, io, time
 from pathlib import Path
-
 
 # ─── LAYOUTS OFICIAIS SPED ───────────────────────────────────────────────────
 # Registro C100 — Documento Fiscal (Cód. 01, 1B, 04, 55, 65)
@@ -36,13 +48,12 @@ C170_FIELDS = [
 # ─── PARSER OTIMIZADO ────────────────────────────────────────────────────────
 def parse_efd_bytes(raw: bytes) -> dict:
     """Parseia o conteúdo bruto do EFD em bytes, retornando entradas e saídas."""
-    entradas = []  # lista de dicts {c100: [...], c170s: [[...], ...]}
+    entradas = []
     saidas = []
     current_c100 = None
     current_c170s = []
     current_oper = None
 
-    # Decodifica tentando latin-1 (padrão SPED ASCII ISO 8859-1)
     try:
         text = raw.decode("latin-1")
     except Exception:
@@ -53,7 +64,6 @@ def parse_efd_bytes(raw: bytes) -> dict:
         if not line:
             continue
 
-        # Remove pipes externos
         if line.startswith("|"):
             line = line[1:]
         if line.endswith("|"):
@@ -63,7 +73,6 @@ def parse_efd_bytes(raw: bytes) -> dict:
         reg = parts[0].strip().upper()
 
         if reg == "C100":
-            # Salva o C100 anterior se existir
             if current_c100 is not None:
                 rec = {"c100": current_c100, "c170s": current_c170s}
                 if current_oper == "0":
@@ -71,20 +80,18 @@ def parse_efd_bytes(raw: bytes) -> dict:
                 elif current_oper == "1":
                     saidas.append(rec)
 
-            # Mapeia campos do C100
             current_c100 = []
-            for i, campo in enumerate(C100_FIELDS):
+            for i in range(len(C100_FIELDS)):
                 current_c100.append(parts[i] if i < len(parts) else "")
             current_c170s = []
             current_oper = parts[1].strip() if len(parts) > 1 else ""
 
         elif reg == "C170" and current_c100 is not None:
             item = []
-            for i, campo in enumerate(C170_FIELDS):
+            for i in range(len(C170_FIELDS)):
                 item.append(parts[i] if i < len(parts) else "")
             current_c170s.append(item)
 
-    # Último C100 pendente
     if current_c100 is not None:
         rec = {"c100": current_c100, "c170s": current_c170s}
         if current_oper == "0":
@@ -113,6 +120,7 @@ def extract_file_from_upload(uploaded) -> bytes:
 
     elif name.endswith(".rar"):
         try:
+            _install("rarfile")
             import rarfile
             with tempfile.NamedTemporaryFile(suffix=".rar", delete=False) as tmp:
                 tmp.write(raw)
@@ -127,9 +135,6 @@ def extract_file_from_upload(uploaded) -> bytes:
                 data = rf.read(txt_files[0])
             os.unlink(tmp_path)
             return data
-        except ImportError:
-            st.error("Biblioteca `rarfile` não instalada. Execute: `pip install rarfile`")
-            return None
         except Exception as e:
             st.error(f"Erro ao extrair RAR: {e}")
             return None
@@ -138,12 +143,11 @@ def extract_file_from_upload(uploaded) -> bytes:
 
 
 # ─── GERADOR XLSX ────────────────────────────────────────────────────────────
-
-
 def build_xlsx(data: dict) -> bytes:
-    """Gera o XLSX com abas de Entradas e Saídas usando openpyxl write_only (alta performance)."""
+    """Gera o XLSX com abas de Entradas e Saídas usando openpyxl write_only."""
     from openpyxl import Workbook
     from openpyxl.styles import Font, PatternFill, Alignment
+    from openpyxl.cell import WriteOnlyCell
     from openpyxl.utils import get_column_letter
 
     c100_headers = [f"C100_{c}" for c in C100_FIELDS]
@@ -153,69 +157,55 @@ def build_xlsx(data: dict) -> bytes:
     n_total = len(all_headers)
     empty_c170 = [""] * len(C170_FIELDS)
 
-    # Estilos
-    sty_h_c100 = {
-        "font": Font(name="Arial", bold=True, color="FFFFFF", size=10),
-        "fill": PatternFill("solid", fgColor="1F4E79"),
-        "alignment": Alignment(horizontal="center", vertical="center"),
-    }
-    sty_h_c170 = {
-        "font": Font(name="Arial", bold=True, color="FFFFFF", size=10),
-        "fill": PatternFill("solid", fgColor="2E75B6"),
-        "alignment": Alignment(horizontal="center", vertical="center"),
-    }
-    font_data = Font(name="Arial", size=9)
-    fill_zebra = PatternFill("solid", fgColor="F2F7FB")
+    font_h = Font(name="Arial", bold=True, color="FFFFFF", size=10)
+    fill_c100 = PatternFill("solid", fgColor="1F4E79")
+    fill_c170 = PatternFill("solid", fgColor="2E75B6")
+    align_c = Alignment(horizontal="center", vertical="center")
+    font_d = Font(name="Arial", size=9)
+    fill_z = PatternFill("solid", fgColor="F2F7FB")
 
     wb = Workbook(write_only=True)
 
     def write_sheet(title, records):
         ws = wb.create_sheet(title=title)
 
-        # Header row — precisa ser WriteOnlyCell para aplicar estilo
-        from openpyxl.cell import WriteOnlyCell
         header_cells = []
         for i, h in enumerate(all_headers):
             cell = WriteOnlyCell(ws, value=h)
-            sty = sty_h_c170 if i >= n_c100 else sty_h_c100
-            cell.font = sty["font"]
-            cell.fill = sty["fill"]
-            cell.alignment = sty["alignment"]
+            cell.font = font_h
+            cell.fill = fill_c170 if i >= n_c100 else fill_c100
+            cell.alignment = align_c
             header_cells.append(cell)
         ws.append(header_cells)
 
-        # Dados — escrita rápida em modo streaming
         row_num = 0
         for rec in records:
             c100 = rec["c100"]
             c170s = rec["c170s"]
             if not c170s:
                 row_num += 1
-                row_vals = c100 + empty_c170
-                # Pad/trim
-                row_vals = row_vals[:n_total]
+                row_vals = (c100 + empty_c170)[:n_total]
                 cells = []
                 for val in row_vals:
                     cell = WriteOnlyCell(ws, value=val)
-                    cell.font = font_data
+                    cell.font = font_d
                     if row_num % 2 == 0:
-                        cell.fill = fill_zebra
+                        cell.fill = fill_z
                     cells.append(cell)
                 ws.append(cells)
             else:
                 for item in c170s:
                     row_num += 1
                     row_vals = c100 + item
-                    # Pad se necessário
                     while len(row_vals) < n_total:
                         row_vals.append("")
                     row_vals = row_vals[:n_total]
                     cells = []
                     for val in row_vals:
                         cell = WriteOnlyCell(ws, value=val)
-                        cell.font = font_data
+                        cell.font = font_d
                         if row_num % 2 == 0:
-                            cell.fill = fill_zebra
+                            cell.fill = fill_z
                         cells.append(cell)
                     ws.append(cells)
 
@@ -224,20 +214,19 @@ def build_xlsx(data: dict) -> bytes:
             cell.font = Font(name="Arial", bold=True, size=11, color="CC0000")
             ws.append([cell])
 
-        # Larguras de coluna
         for col_idx, h in enumerate(all_headers, 1):
-            h_upper = h.upper()
-            if "CHV_NFE" in h_upper:
+            hu = h.upper()
+            if "CHV_NFE" in hu:
                 w = 48
-            elif "DESCR" in h_upper:
+            elif "DESCR" in hu:
                 w = 32
-            elif "COD_PART" in h_upper:
+            elif "COD_PART" in hu:
                 w = 18
-            elif "VL_" in h_upper or "ALIQ" in h_upper:
+            elif "VL_" in hu or "ALIQ" in hu:
                 w = 14
-            elif "DT_" in h_upper:
+            elif "DT_" in hu:
                 w = 12
-            elif "NUM_DOC" in h_upper:
+            elif "NUM_DOC" in hu:
                 w = 14
             else:
                 w = max(len(h) + 2, 11)
@@ -267,7 +256,6 @@ def detect_efd_type(raw: bytes) -> str:
                 if p in ("007", "008", "009", "010", "011", "012", "013",
                          "014", "015", "016", "017", "018", "019", "020"):
                     return "EFD ICMS/IPI"
-            # EFD Contribuições usa códigos de leiaute diferentes
             return "EFD Contribuições"
     return "Não identificado"
 
@@ -295,98 +283,56 @@ def main():
         layout="wide"
     )
 
-    # CSS customizado
     st.markdown("""
     <style>
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
-
-    .main .block-container {
-        max-width: 900px;
-        padding-top: 2rem;
-    }
-
+    .main .block-container { max-width: 900px; padding-top: 2rem; }
     .hero-title {
-        font-family: 'Inter', sans-serif;
-        font-size: 2rem;
-        font-weight: 700;
-        color: #1F4E79;
-        text-align: center;
-        margin-bottom: 0.2rem;
+        font-family: 'Inter', sans-serif; font-size: 2rem; font-weight: 700;
+        color: #1F4E79; text-align: center; margin-bottom: 0.2rem;
     }
-
     .hero-sub {
-        font-family: 'Inter', sans-serif;
-        font-size: 1rem;
-        color: #666;
-        text-align: center;
-        margin-bottom: 2rem;
+        font-family: 'Inter', sans-serif; font-size: 1rem;
+        color: #666; text-align: center; margin-bottom: 2rem;
     }
-
     .stat-card {
         background: linear-gradient(135deg, #f8fafc, #eef2f7);
-        border: 1px solid #e2e8f0;
-        border-radius: 12px;
-        padding: 1.2rem;
-        text-align: center;
+        border: 1px solid #e2e8f0; border-radius: 12px;
+        padding: 1.2rem; text-align: center;
     }
-
     .stat-card h3 {
-        font-family: 'Inter', sans-serif;
-        font-size: 1.8rem;
-        font-weight: 700;
-        color: #1F4E79;
-        margin: 0;
+        font-family: 'Inter', sans-serif; font-size: 1.8rem;
+        font-weight: 700; color: #1F4E79; margin: 0;
     }
-
     .stat-card p {
-        font-family: 'Inter', sans-serif;
-        font-size: 0.85rem;
-        color: #64748b;
-        margin: 0.3rem 0 0 0;
+        font-family: 'Inter', sans-serif; font-size: 0.85rem;
+        color: #64748b; margin: 0.3rem 0 0 0;
     }
-
     .info-badge {
-        display: inline-block;
-        background: #e0f2fe;
-        color: #0369a1;
-        font-family: 'Inter', sans-serif;
-        font-size: 0.8rem;
-        font-weight: 600;
-        padding: 0.3rem 0.8rem;
-        border-radius: 20px;
-        margin: 0.2rem;
+        display: inline-block; background: #e0f2fe; color: #0369a1;
+        font-family: 'Inter', sans-serif; font-size: 0.8rem; font-weight: 600;
+        padding: 0.3rem 0.8rem; border-radius: 20px; margin: 0.2rem;
     }
-
     div[data-testid="stFileUploader"] {
         border: 2px dashed #2E75B6 !important;
-        border-radius: 12px !important;
-        padding: 1rem !important;
+        border-radius: 12px !important; padding: 1rem !important;
     }
-
     .stDownloadButton > button {
         background: linear-gradient(135deg, #1F4E79, #2E75B6) !important;
-        color: white !important;
-        font-weight: 600 !important;
-        border-radius: 10px !important;
-        padding: 0.7rem 2rem !important;
-        border: none !important;
-        width: 100% !important;
-        font-size: 1rem !important;
+        color: white !important; font-weight: 600 !important;
+        border-radius: 10px !important; padding: 0.7rem 2rem !important;
+        border: none !important; width: 100% !important; font-size: 1rem !important;
     }
-
     .stDownloadButton > button:hover {
         background: linear-gradient(135deg, #163a5c, #1F4E79) !important;
     }
-
     footer {visibility: hidden;}
     </style>
     """, unsafe_allow_html=True)
 
-    # Header
     st.markdown('<div class="hero-title">📊 EFD Extrator C100 + C170</div>', unsafe_allow_html=True)
     st.markdown('<div class="hero-sub">Extraia registros de Notas Fiscais do seu SPED em segundos</div>', unsafe_allow_html=True)
 
-    # Badges informativos
     st.markdown("""
     <div style="text-align:center; margin-bottom: 1.5rem;">
         <span class="info-badge">EFD ICMS/IPI</span>
@@ -398,7 +344,6 @@ def main():
 
     st.divider()
 
-    # Upload
     uploaded = st.file_uploader(
         "📂 Importe o arquivo EFD",
         type=["txt", "zip", "rar"],
@@ -406,43 +351,25 @@ def main():
     )
 
     if uploaded is not None:
-        # Extrai conteúdo
         with st.spinner("Extraindo arquivo..."):
             raw = extract_file_from_upload(uploaded)
 
         if raw is None:
             st.stop()
 
-        # Informações do arquivo
         efd_type = detect_efd_type(raw)
         counts = count_records(raw)
         file_size_mb = len(raw) / (1024 * 1024)
 
         col1, col2, col3, col4 = st.columns(4)
         with col1:
-            st.markdown(f"""
-            <div class="stat-card">
-                <h3>{efd_type.split()[-1] if '/' not in efd_type else 'ICMS/IPI'}</h3>
-                <p>Tipo EFD</p>
-            </div>""", unsafe_allow_html=True)
+            st.markdown(f'<div class="stat-card"><h3>{efd_type.split()[-1] if "/" not in efd_type else "ICMS/IPI"}</h3><p>Tipo EFD</p></div>', unsafe_allow_html=True)
         with col2:
-            st.markdown(f"""
-            <div class="stat-card">
-                <h3>{counts['C100']:,}</h3>
-                <p>Registros C100</p>
-            </div>""", unsafe_allow_html=True)
+            st.markdown(f'<div class="stat-card"><h3>{counts["C100"]:,}</h3><p>Registros C100</p></div>', unsafe_allow_html=True)
         with col3:
-            st.markdown(f"""
-            <div class="stat-card">
-                <h3>{counts['C170']:,}</h3>
-                <p>Registros C170</p>
-            </div>""", unsafe_allow_html=True)
+            st.markdown(f'<div class="stat-card"><h3>{counts["C170"]:,}</h3><p>Registros C170</p></div>', unsafe_allow_html=True)
         with col4:
-            st.markdown(f"""
-            <div class="stat-card">
-                <h3>{file_size_mb:.1f} MB</h3>
-                <p>Tamanho</p>
-            </div>""", unsafe_allow_html=True)
+            st.markdown(f'<div class="stat-card"><h3>{file_size_mb:.1f} MB</h3><p>Tamanho</p></div>', unsafe_allow_html=True)
 
         if counts["C100"] == 0:
             st.warning("⚠️ Nenhum registro C100 encontrado neste arquivo. Verifique se é um arquivo EFD válido.")
@@ -450,7 +377,6 @@ def main():
 
         st.divider()
 
-        # Processa
         if st.button("⚡ Processar e Gerar Planilha", use_container_width=True, type="primary"):
             t0 = time.time()
 
@@ -469,7 +395,6 @@ def main():
 
             st.success(f"✅ Processado em {elapsed:.1f}s")
 
-            # Resumo
             col_e, col_s = st.columns(2)
             with col_e:
                 st.markdown(f"""
@@ -488,7 +413,6 @@ def main():
 
             st.markdown("<br>", unsafe_allow_html=True)
 
-            # Gera nome do arquivo de saída
             base_name = Path(uploaded.name).stem
             output_name = f"{base_name}_C100_C170.xlsx"
 
@@ -500,7 +424,6 @@ def main():
                 use_container_width=True
             )
 
-    # Rodapé
     st.markdown("<br>", unsafe_allow_html=True)
     st.divider()
     st.markdown("""
