@@ -141,76 +141,91 @@ def extract_file_from_upload(uploaded) -> bytes:
 
 
 def build_xlsx(data: dict) -> bytes:
-    """Gera o XLSX com abas de Entradas e Saídas usando xlsxwriter (alta performance)."""
-    import xlsxwriter
+    """Gera o XLSX com abas de Entradas e Saídas usando openpyxl write_only (alta performance)."""
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment
+    from openpyxl.utils import get_column_letter
 
     c100_headers = [f"C100_{c}" for c in C100_FIELDS]
     c170_headers = [f"C170_{c}" for c in C170_FIELDS]
     all_headers = c100_headers + c170_headers
     n_c100 = len(c100_headers)
+    n_total = len(all_headers)
+    empty_c170 = [""] * len(C170_FIELDS)
 
-    buf = io.BytesIO()
-    wb = xlsxwriter.Workbook(buf, {"in_memory": True, "strings_to_numbers": False})
+    # Estilos
+    sty_h_c100 = {
+        "font": Font(name="Arial", bold=True, color="FFFFFF", size=10),
+        "fill": PatternFill("solid", fgColor="1F4E79"),
+        "alignment": Alignment(horizontal="center", vertical="center"),
+    }
+    sty_h_c170 = {
+        "font": Font(name="Arial", bold=True, color="FFFFFF", size=10),
+        "fill": PatternFill("solid", fgColor="2E75B6"),
+        "alignment": Alignment(horizontal="center", vertical="center"),
+    }
+    font_data = Font(name="Arial", size=9)
+    fill_zebra = PatternFill("solid", fgColor="F2F7FB")
 
-    # Formatos
-    fmt_h_c100 = wb.add_format({
-        "bold": True, "font_name": "Arial", "font_size": 10,
-        "font_color": "#FFFFFF", "bg_color": "#1F4E79",
-        "align": "center", "valign": "vcenter",
-        "border": 1, "border_color": "#D9D9D9",
-        "text_wrap": True
-    })
-    fmt_h_c170 = wb.add_format({
-        "bold": True, "font_name": "Arial", "font_size": 10,
-        "font_color": "#FFFFFF", "bg_color": "#2E75B6",
-        "align": "center", "valign": "vcenter",
-        "border": 1, "border_color": "#D9D9D9",
-        "text_wrap": True
-    })
-    fmt_data = wb.add_format({
-        "font_name": "Arial", "font_size": 9,
-        "border": 1, "border_color": "#E8E8E8"
-    })
-    fmt_zebra = wb.add_format({
-        "font_name": "Arial", "font_size": 9,
-        "bg_color": "#F2F7FB",
-        "border": 1, "border_color": "#E8E8E8"
-    })
+    wb = Workbook(write_only=True)
 
-    def write_sheet(ws, records, label):
-        # Headers
-        for col, h in enumerate(all_headers):
-            fmt = fmt_h_c170 if col >= n_c100 else fmt_h_c100
-            ws.write(0, col, h, fmt)
+    def write_sheet(title, records):
+        ws = wb.create_sheet(title=title)
 
-        # Freeze + filtro
-        ws.freeze_panes(1, 0)
-        ws.autofilter(0, 0, 0, len(all_headers) - 1)
+        # Header row — precisa ser WriteOnlyCell para aplicar estilo
+        from openpyxl.cell import WriteOnlyCell
+        header_cells = []
+        for i, h in enumerate(all_headers):
+            cell = WriteOnlyCell(ws, value=h)
+            sty = sty_h_c170 if i >= n_c100 else sty_h_c100
+            cell.font = sty["font"]
+            cell.fill = sty["fill"]
+            cell.alignment = sty["alignment"]
+            header_cells.append(cell)
+        ws.append(header_cells)
 
-        # Dados
-        row = 1
+        # Dados — escrita rápida em modo streaming
+        row_num = 0
         for rec in records:
             c100 = rec["c100"]
             c170s = rec["c170s"]
             if not c170s:
-                fmt = fmt_zebra if (row % 2) == 0 else fmt_data
-                for col, val in enumerate(c100):
-                    ws.write(row, col, val, fmt)
-                row += 1
+                row_num += 1
+                row_vals = c100 + empty_c170
+                # Pad/trim
+                row_vals = row_vals[:n_total]
+                cells = []
+                for val in row_vals:
+                    cell = WriteOnlyCell(ws, value=val)
+                    cell.font = font_data
+                    if row_num % 2 == 0:
+                        cell.fill = fill_zebra
+                    cells.append(cell)
+                ws.append(cells)
             else:
                 for item in c170s:
-                    fmt = fmt_zebra if (row % 2) == 0 else fmt_data
-                    for col, val in enumerate(c100):
-                        ws.write(row, col, val, fmt)
-                    for col, val in enumerate(item):
-                        ws.write(row, n_c100 + col, val, fmt)
-                    row += 1
+                    row_num += 1
+                    row_vals = c100 + item
+                    # Pad se necessário
+                    while len(row_vals) < n_total:
+                        row_vals.append("")
+                    row_vals = row_vals[:n_total]
+                    cells = []
+                    for val in row_vals:
+                        cell = WriteOnlyCell(ws, value=val)
+                        cell.font = font_data
+                        if row_num % 2 == 0:
+                            cell.fill = fill_zebra
+                        cells.append(cell)
+                    ws.append(cells)
 
-        if row == 1:
-            ws.write(1, 0, f"Nenhum registro de {label} encontrado.")
+        if row_num == 0:
+            cell = WriteOnlyCell(ws, value=f"Nenhum registro de {title} encontrado.")
+            cell.font = Font(name="Arial", bold=True, size=11, color="CC0000")
+            ws.append([cell])
 
-        # Larguras
-        for col, h in enumerate(all_headers):
+        # Larguras de coluna
+        for col_idx, h in enumerate(all_headers, 1):
             h_upper = h.upper()
             if "CHV_NFE" in h_upper:
                 w = 48
@@ -226,15 +241,13 @@ def build_xlsx(data: dict) -> bytes:
                 w = 14
             else:
                 w = max(len(h) + 2, 11)
-            ws.set_column(col, col, min(w, 50))
+            ws.column_dimensions[get_column_letter(col_idx)].width = min(w, 50)
 
-    ws_ent = wb.add_worksheet("ENTRADAS")
-    ws_sai = wb.add_worksheet("SAÍDAS")
+    write_sheet("ENTRADAS", data["entradas"])
+    write_sheet("SAÍDAS", data["saidas"])
 
-    write_sheet(ws_ent, data["entradas"], "ENTRADAS")
-    write_sheet(ws_sai, data["saidas"], "SAÍDAS")
-
-    wb.close()
+    buf = io.BytesIO()
+    wb.save(buf)
     return buf.getvalue()
 
 
