@@ -1,10 +1,9 @@
 """
 EFD Extrator C100 + C170 — Entradas & Saídas
-Ferramenta para extrair registros C100 e C170 de arquivos EFD ICMS/IPI e EFD Contribuições,
-gerando planilha XLSX organizada com abas de Entradas e Saídas.
-Inclui NCM e CEST do registro 0200 vinculado ao item.
+Extrai registros C100 e C170 com NCM/CEST do 0200,
+gerando XLSX com colunas selecionadas e bordas completas.
 """
-# ─── AUTO-INSTALL DE DEPENDÊNCIAS ────────────────────────────────────────────
+# ─── AUTO-INSTALL ────────────────────────────────────────────────────────────
 import subprocess, sys
 
 def _install(pkg):
@@ -20,14 +19,11 @@ import streamlit as st
 import tempfile, zipfile, os, io, time
 from pathlib import Path
 
-# ─── LAYOUTS OFICIAIS SPED ───────────────────────────────────────────────────
-# Registro 0200 — Tabela de Identificação do Item
-# |0200|COD_ITEM|DESCR_ITEM|COD_BARRA|COD_ANT_ITEM|UNID_INV|TIPO_ITEM|COD_NCM|EX_IPI|COD_GEN|COD_LST|ALIQ_ICMS|CEST|
+# ─── LAYOUTS SPED ────────────────────────────────────────────────────────────
 IDX_0200_COD_ITEM = 1
 IDX_0200_COD_NCM  = 7
 IDX_0200_CEST     = 12
 
-# Registro C100 — Documento Fiscal (Cód. 01, 1B, 04, 55, 65)
 C100_FIELDS = [
     "REG", "IND_OPER", "IND_EMIT", "COD_PART", "COD_MOD", "COD_SIT",
     "SER", "NUM_DOC", "CHV_NFE", "DT_DOC", "DT_E_S", "VL_DOC",
@@ -37,7 +33,6 @@ C100_FIELDS = [
     "VL_PIS_ST", "VL_COFINS_ST"
 ]
 
-# Registro C170 — Itens do Documento (Cód. 01, 1B, 04, 55)
 C170_FIELDS = [
     "REG", "NUM_ITEM", "COD_ITEM", "DESCR_COMPL", "QTD", "UNID",
     "VL_ITEM", "VL_DESC", "IND_MOV", "CST_ICMS", "CFOP", "COD_NAT",
@@ -49,27 +44,38 @@ C170_FIELDS = [
     "VL_COFINS", "COD_CTA", "VL_ABAT_NT"
 ]
 
-# Campos extras vinculados do 0200
-EXTRA_FIELDS = ["NCM", "CEST"]
-
-# Índice do COD_ITEM dentro do C170 (campo 2, índice 2)
-IDX_C170_COD_ITEM = 2
-
-# Pré-calcula tamanhos para evitar chamadas repetidas
 N_C100 = len(C100_FIELDS)
 N_C170 = len(C170_FIELDS)
-N_EXTRA = len(EXTRA_FIELDS)
-N_TOTAL = N_C100 + N_C170 + N_EXTRA
+
+# ─── COLUNAS DE SAÍDA (ordem exata solicitada) ──────────────────────────────
+_C100_IDX = {f: i for i, f in enumerate(C100_FIELDS)}
+_C170_IDX = {f: i for i, f in enumerate(C170_FIELDS)}
+
+OUTPUT_COLUMNS = [
+    ("NUM_DOC",     "c100", _C100_IDX["NUM_DOC"]),
+    ("COD_ITEM",    "c170", _C170_IDX["COD_ITEM"]),
+    ("DESCR_COMPL", "c170", _C170_IDX["DESCR_COMPL"]),
+    ("NCM",         "0200", 0),
+    ("CEST",        "0200", 1),
+    ("VL_ITEM",     "c170", _C170_IDX["VL_ITEM"]),
+    ("CST_ICMS",    "c170", _C170_IDX["CST_ICMS"]),
+    ("CFOP",        "c170", _C170_IDX["CFOP"]),
+    ("VL_BC_ICMS",  "c170", _C170_IDX["VL_BC_ICMS"]),
+    ("ALIQ_ICMS",   "c170", _C170_IDX["ALIQ_ICMS"]),
+    ("VL_ICMS",     "c170", _C170_IDX["VL_ICMS"]),
+]
+
+HEADERS    = [h for h, _, _ in OUTPUT_COLUMNS]
+N_OUTPUT   = len(OUTPUT_COLUMNS)
+COL_WIDTHS = {
+    "NUM_DOC": 14, "COD_ITEM": 16, "DESCR_COMPL": 40, "NCM": 14,
+    "CEST": 14, "VL_ITEM": 15, "CST_ICMS": 12, "CFOP": 10,
+    "VL_BC_ICMS": 15, "ALIQ_ICMS": 13, "VL_ICMS": 15,
+}
 
 
-# ─── PARSER OTIMIZADO (PASSAGEM ÚNICA) ───────────────────────────────────────
+# ─── PARSER OTIMIZADO ────────────────────────────────────────────────────────
 def parse_efd_bytes(raw: bytes) -> dict:
-    """
-    Parseia o EFD em uma única passagem:
-      1. Constrói dicionário 0200 (COD_ITEM → NCM, CEST)
-      2. Extrai C100 + C170, enriquecendo cada C170 com NCM/CEST
-    Retorna dict com chaves 'entradas', 'saidas' e 'itens_0200'.
-    """
     try:
         text = raw.decode("latin-1")
     except Exception:
@@ -77,7 +83,7 @@ def parse_efd_bytes(raw: bytes) -> dict:
 
     lines = text.splitlines()
 
-    # ── Fase 1: indexar todos os 0200 ────────────────────────────────────
+    # Fase 1: indexar 0200
     lookup_0200: dict[str, tuple[str, str]] = {}
     for line in lines:
         if "|0200|" not in line:
@@ -92,23 +98,22 @@ def parse_efd_bytes(raw: bytes) -> dict:
         parts = stripped.split("|")
         if parts[0].strip().upper() != "0200":
             continue
-        cod_item = parts[IDX_0200_COD_ITEM].strip() if len(parts) > IDX_0200_COD_ITEM else ""
-        ncm      = parts[IDX_0200_COD_NCM].strip()  if len(parts) > IDX_0200_COD_NCM  else ""
-        cest     = parts[IDX_0200_CEST].strip()      if len(parts) > IDX_0200_CEST     else ""
-        if cod_item:
-            lookup_0200[cod_item] = (ncm, cest)
+        cod  = parts[IDX_0200_COD_ITEM].strip() if len(parts) > IDX_0200_COD_ITEM else ""
+        ncm  = parts[IDX_0200_COD_NCM].strip()  if len(parts) > IDX_0200_COD_NCM  else ""
+        cest = parts[IDX_0200_CEST].strip()      if len(parts) > IDX_0200_CEST     else ""
+        if cod:
+            lookup_0200[cod] = (ncm, cest)
 
-    # ── Fase 2: extrair C100 + C170 ─────────────────────────────────────
+    # Fase 2: C100 + C170
     entradas = []
     saidas   = []
     current_c100  = None
     current_c170s = []
     current_oper  = None
-
-    empty_extra = ("", "")
+    empty_extra   = ("", "")
+    cod_item_idx  = _C170_IDX["COD_ITEM"]
 
     def _flush():
-        """Salva o bloco C100+C170s acumulado na lista correta."""
         nonlocal current_c100, current_c170s, current_oper
         if current_c100 is None:
             return
@@ -123,13 +128,8 @@ def parse_efd_bytes(raw: bytes) -> dict:
 
     for line in lines:
         stripped = line.strip()
-        if not stripped:
+        if not stripped or "|C1" not in stripped:
             continue
-
-        # Detecta rápido se é C100 ou C170 antes de fazer split
-        if "|C1" not in stripped:
-            continue
-
         if stripped[0] == "|":
             stripped = stripped[1:]
         if stripped[-1] == "|":
@@ -150,27 +150,23 @@ def parse_efd_bytes(raw: bytes) -> dict:
             c170 = parts[:N_C170]
             while len(c170) < N_C170:
                 c170.append("")
-            # Enriquece com NCM e CEST do 0200
-            cod_item = c170[IDX_C170_COD_ITEM].strip()
+            cod_item = c170[cod_item_idx].strip()
             extra = lookup_0200.get(cod_item, empty_extra)
-            c170.append(extra[0])  # NCM
-            c170.append(extra[1])  # CEST
-            current_c170s.append(c170)
+            current_c170s.append((c170, extra))
 
     _flush()
 
     return {
-        "entradas":  entradas,
-        "saidas":    saidas,
+        "entradas":   entradas,
+        "saidas":     saidas,
         "itens_0200": len(lookup_0200),
     }
 
 
 # ─── EXTRAÇÃO DE ARQUIVO ────────────────────────────────────────────────────
 def extract_file_from_upload(uploaded) -> bytes | None:
-    """Extrai o conteúdo TXT do arquivo (suporte a TXT, ZIP, RAR)."""
     name = uploaded.name.lower()
-    raw = uploaded.read()
+    raw  = uploaded.read()
 
     if name.endswith(".zip"):
         with zipfile.ZipFile(io.BytesIO(raw)) as zf:
@@ -209,105 +205,69 @@ def extract_file_from_upload(uploaded) -> bytes | None:
 
 # ─── GERADOR XLSX ────────────────────────────────────────────────────────────
 def build_xlsx(data: dict) -> bytes:
-    """Gera XLSX com abas Entradas e Saídas, incluindo NCM e CEST."""
     from openpyxl import Workbook
-    from openpyxl.styles import Font, PatternFill, Alignment
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
     from openpyxl.cell import WriteOnlyCell
     from openpyxl.utils import get_column_letter
 
-    c100_headers  = [f"C100_{c}" for c in C100_FIELDS]
-    c170_headers  = [f"C170_{c}" for c in C170_FIELDS]
-    extra_headers = ["0200_NCM", "0200_CEST"]
-    all_headers   = c100_headers + c170_headers + extra_headers
-
-    empty_c170 = [""] * (N_C170 + N_EXTRA)
-
     # Estilos pré-criados
-    font_h    = Font(name="Arial", bold=True, color="FFFFFF", size=10)
-    fill_c100 = PatternFill("solid", fgColor="1F4E79")
-    fill_c170 = PatternFill("solid", fgColor="2E75B6")
-    fill_ext  = PatternFill("solid", fgColor="6B21A8")
-    align_c   = Alignment(horizontal="center", vertical="center")
-    font_d    = Font(name="Arial", size=9)
-    fill_z    = PatternFill("solid", fgColor="F2F7FB")
+    thin       = Side(style="thin", color="999999")
+    border_all = Border(left=thin, right=thin, top=thin, bottom=thin)
+    font_h     = Font(name="Arial", bold=True, color="FFFFFF", size=10)
+    fill_h     = PatternFill("solid", fgColor="1F4E79")
+    align_c    = Alignment(horizontal="center", vertical="center")
+    align_l    = Alignment(horizontal="left",   vertical="center")
+    font_d     = Font(name="Arial", size=9)
+    fill_z     = PatternFill("solid", fgColor="F2F7FB")
+    fill_w     = PatternFill("solid", fgColor="FFFFFF")
 
     wb = Workbook(write_only=True)
+
+    def _cell(ws, val, font, fill, align):
+        c = WriteOnlyCell(ws, value=val)
+        c.font, c.fill, c.alignment, c.border = font, fill, align, border_all
+        return c
+
+    def _extract_row(c100, c170, extra):
+        row = []
+        for _, origem, idx in OUTPUT_COLUMNS:
+            if origem == "c100":
+                row.append(c100[idx])
+            elif origem == "c170":
+                row.append(c170[idx])
+            else:
+                row.append(extra[idx])
+        return row
 
     def write_sheet(title: str, records: list):
         ws = wb.create_sheet(title=title)
 
-        # ── Cabeçalho ────────────────────────────────────────────────────
-        header_cells = []
-        for i, h in enumerate(all_headers):
-            cell = WriteOnlyCell(ws, value=h)
-            cell.font = font_h
-            cell.alignment = align_c
-            if i < N_C100:
-                cell.fill = fill_c100
-            elif i < N_C100 + N_C170:
-                cell.fill = fill_c170
-            else:
-                cell.fill = fill_ext
-            header_cells.append(cell)
-        ws.append(header_cells)
+        # Cabeçalho
+        ws.append([_cell(ws, h, font_h, fill_h, align_c) for h in HEADERS])
 
-        # ── Dados ────────────────────────────────────────────────────────
+        # Dados
         row_num = 0
-        use_zebra = False
         for c100, c170s in records:
             if not c170s:
+                continue
+            for c170, extra in c170s:
                 row_num += 1
-                use_zebra = not use_zebra
-                row_vals = c100 + empty_c170
+                fill = fill_z if row_num % 2 == 0 else fill_w
+                vals = _extract_row(c100, c170, extra)
                 cells = []
-                for val in row_vals[:N_TOTAL]:
-                    cell = WriteOnlyCell(ws, value=val)
-                    cell.font = font_d
-                    if use_zebra:
-                        cell.fill = fill_z
-                    cells.append(cell)
+                for i, val in enumerate(vals):
+                    al = align_l if HEADERS[i] == "DESCR_COMPL" else align_c
+                    cells.append(_cell(ws, val, font_d, fill, al))
                 ws.append(cells)
-            else:
-                for item in c170s:
-                    row_num += 1
-                    use_zebra = not use_zebra
-                    row_vals = c100 + item
-                    cells = []
-                    for val in row_vals[:N_TOTAL]:
-                        cell = WriteOnlyCell(ws, value=val)
-                        cell.font = font_d
-                        if use_zebra:
-                            cell.fill = fill_z
-                        cells.append(cell)
-                    ws.append(cells)
 
         if row_num == 0:
-            cell = WriteOnlyCell(ws, value=f"Nenhum registro de {title} encontrado.")
-            cell.font = Font(name="Arial", bold=True, size=11, color="CC0000")
-            ws.append([cell])
+            c = WriteOnlyCell(ws, value=f"Nenhum registro de {title} encontrado.")
+            c.font = Font(name="Arial", bold=True, size=11, color="CC0000")
+            ws.append([c])
 
-        # ── Larguras de coluna ───────────────────────────────────────────
-        for col_idx, h in enumerate(all_headers, 1):
-            hu = h.upper()
-            if "CHV_NFE" in hu:
-                w = 48
-            elif "DESCR" in hu:
-                w = 32
-            elif "COD_PART" in hu:
-                w = 18
-            elif "NCM" in hu:
-                w = 14
-            elif "CEST" in hu:
-                w = 14
-            elif "VL_" in hu or "ALIQ" in hu:
-                w = 14
-            elif "DT_" in hu:
-                w = 12
-            elif "NUM_DOC" in hu:
-                w = 14
-            else:
-                w = max(len(h) + 2, 11)
-            ws.column_dimensions[get_column_letter(col_idx)].width = min(w, 50)
+        # Larguras
+        for col_idx, h in enumerate(HEADERS, 1):
+            ws.column_dimensions[get_column_letter(col_idx)].width = COL_WIDTHS.get(h, 12)
 
     write_sheet("ENTRADAS", data["entradas"])
     write_sheet("SAÍDAS",   data["saidas"])
@@ -319,7 +279,6 @@ def build_xlsx(data: dict) -> bytes:
 
 # ─── UTILITÁRIOS ─────────────────────────────────────────────────────────────
 def detect_efd_type(raw: bytes) -> str:
-    """Detecta se é EFD ICMS/IPI ou EFD Contribuições pelo registro 0000."""
     try:
         text = raw.decode("latin-1")
     except Exception:
@@ -329,36 +288,30 @@ def detect_efd_type(raw: bytes) -> str:
             continue
         parts = line.split("|")
         for p in parts:
-            p = p.strip()
-            if p in ("007","008","009","010","011","012","013",
-                     "014","015","016","017","018","019","020"):
+            if p.strip() in ("007","008","009","010","011","012","013",
+                              "014","015","016","017","018","019","020"):
                 return "EFD ICMS/IPI"
         return "EFD Contribuições"
     return "Não identificado"
 
 
 def count_records(raw: bytes) -> dict:
-    """Conta linhas C100, C170 e 0200 rapidamente."""
     try:
         text = raw.decode("latin-1")
     except Exception:
         text = raw.decode("utf-8", errors="replace")
     c100 = c170 = r0200 = 0
     for line in text.splitlines():
-        stripped = line.strip()
-        if   stripped.startswith("|C100|"): c100  += 1
-        elif stripped.startswith("|C170|"): c170  += 1
-        elif stripped.startswith("|0200|"): r0200 += 1
+        s = line.strip()
+        if   s.startswith("|C100|"): c100  += 1
+        elif s.startswith("|C170|"): c170  += 1
+        elif s.startswith("|0200|"): r0200 += 1
     return {"C100": c100, "C170": c170, "0200": r0200}
 
 
 # ─── UI STREAMLIT ────────────────────────────────────────────────────────────
 def main():
-    st.set_page_config(
-        page_title="EFD Extrator C100+C170",
-        page_icon="📊",
-        layout="wide"
-    )
+    st.set_page_config(page_title="EFD Extrator C100+C170", page_icon="📊", layout="wide")
 
     st.markdown("""
     <style>
@@ -415,7 +368,6 @@ def main():
         <span class="info-badge">EFD ICMS/IPI</span>
         <span class="info-badge">EFD Contribuições</span>
         <span class="info-badge">TXT • ZIP • RAR</span>
-        <span class="info-badge">XLSX Formatado</span>
         <span class="info-badge">NCM + CEST (0200)</span>
     </div>
     """, unsafe_allow_html=True)
@@ -435,11 +387,10 @@ def main():
         if raw is None:
             st.stop()
 
-        efd_type = detect_efd_type(raw)
-        counts   = count_records(raw)
+        efd_type     = detect_efd_type(raw)
+        counts       = count_records(raw)
         file_size_mb = len(raw) / (1024 * 1024)
-
-        tipo_label = "ICMS/IPI" if "/" in efd_type else efd_type.split()[-1]
+        tipo_label   = "ICMS/IPI" if "/" in efd_type else efd_type.split()[-1]
 
         c1, c2, c3, c4, c5 = st.columns(5)
         with c1:
@@ -465,8 +416,8 @@ def main():
             with st.spinner("Processando registros..."):
                 data = parse_efd_bytes(raw)
 
-            n_ent = len(data["entradas"])
-            n_sai = len(data["saidas"])
+            n_ent       = len(data["entradas"])
+            n_sai       = len(data["saidas"])
             n_itens_ent = sum(len(c170s) for _, c170s in data["entradas"])
             n_itens_sai = sum(len(c170s) for _, c170s in data["saidas"])
 
@@ -475,7 +426,7 @@ def main():
 
             elapsed = time.time() - t0
 
-            st.success(f"✅ Processado em {elapsed:.1f}s — {data['itens_0200']:,} itens no cadastro 0200 vinculados")
+            st.success(f"✅ Processado em {elapsed:.1f}s — {data['itens_0200']:,} itens no cadastro 0200")
 
             col_e, col_s = st.columns(2)
             with col_e:
