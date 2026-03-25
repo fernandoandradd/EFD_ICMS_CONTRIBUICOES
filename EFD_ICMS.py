@@ -203,11 +203,10 @@ def extract_file_from_upload(uploaded) -> bytes | None:
         return raw
 
 
-# ─── GERADOR XLSX ────────────────────────────────────────────────────────────
+# ─── GERADOR XLSX (MODO NORMAL — COMPATIBILIDADE TOTAL) ─────────────────────
 def build_xlsx(data: dict) -> bytes:
     from openpyxl import Workbook
-    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
-    from openpyxl.cell import WriteOnlyCell
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side, NamedStyle
     from openpyxl.utils import get_column_letter
 
     # Estilos pré-criados
@@ -221,12 +220,9 @@ def build_xlsx(data: dict) -> bytes:
     fill_z     = PatternFill("solid", fgColor="F2F7FB")
     fill_w     = PatternFill("solid", fgColor="FFFFFF")
 
-    wb = Workbook(write_only=True)
-
-    def _cell(ws, val, font, fill, align):
-        c = WriteOnlyCell(ws, value=val)
-        c.font, c.fill, c.alignment, c.border = font, fill, align, border_all
-        return c
+    wb = Workbook()
+    # Remove a sheet padrão criada automaticamente
+    wb.remove(wb.active)
 
     def _extract_row(c100, c170, extra):
         row = []
@@ -242,11 +238,16 @@ def build_xlsx(data: dict) -> bytes:
     def write_sheet(title: str, records: list):
         ws = wb.create_sheet(title=title)
 
-        # Cabeçalho
-        ws.append([_cell(ws, h, font_h, fill_h, align_c) for h in HEADERS])
+        # ── Cabeçalho ────────────────────────────────────────────────────
+        for col_idx, h in enumerate(HEADERS, 1):
+            cell = ws.cell(row=1, column=col_idx, value=h)
+            cell.font      = font_h
+            cell.fill       = fill_h
+            cell.alignment  = align_c
+            cell.border     = border_all
 
-        # Dados
-        row_num = 0
+        # ── Dados ────────────────────────────────────────────────────────
+        row_num = 1  # linha 1 é o cabeçalho
         for c100, c170s in records:
             if not c170s:
                 continue
@@ -254,20 +255,27 @@ def build_xlsx(data: dict) -> bytes:
                 row_num += 1
                 fill = fill_z if row_num % 2 == 0 else fill_w
                 vals = _extract_row(c100, c170, extra)
-                cells = []
-                for i, val in enumerate(vals):
-                    al = align_l if HEADERS[i] == "DESCR_COMPL" else align_c
-                    cells.append(_cell(ws, val, font_d, fill, al))
-                ws.append(cells)
+                for col_idx, val in enumerate(vals, 1):
+                    cell = ws.cell(row=row_num, column=col_idx, value=val)
+                    cell.font      = font_d
+                    cell.fill       = fill
+                    cell.alignment  = align_l if HEADERS[col_idx - 1] == "DESCR_COMPL" else align_c
+                    cell.border     = border_all
 
-        if row_num == 0:
-            c = WriteOnlyCell(ws, value=f"Nenhum registro de {title} encontrado.")
-            c.font = Font(name="Arial", bold=True, size=11, color="CC0000")
-            ws.append([c])
+        if row_num == 1:
+            cell = ws.cell(row=2, column=1, value=f"Nenhum registro de {title} encontrado.")
+            cell.font = Font(name="Arial", bold=True, size=11, color="CC0000")
 
-        # Larguras
+        # ── Larguras ─────────────────────────────────────────────────────
         for col_idx, h in enumerate(HEADERS, 1):
             ws.column_dimensions[get_column_letter(col_idx)].width = COL_WIDTHS.get(h, 12)
+
+        # ── Congelar cabeçalho ───────────────────────────────────────────
+        ws.freeze_panes = "A2"
+
+        # ── Autofiltro ───────────────────────────────────────────────────
+        if row_num > 1:
+            ws.auto_filter.ref = f"A1:{get_column_letter(N_OUTPUT)}{row_num}"
 
     write_sheet("ENTRADAS", data["entradas"])
     write_sheet("SAÍDAS",   data["saidas"])
