@@ -1,7 +1,7 @@
 """
-EFD Extrator C100 + C170 — Entradas & Saídas
-Extrai registros C100 e C170 com NCM/CEST do 0200,
-gerando XLSX com colunas selecionadas e bordas completas.
+EFD Extrator C100 + C170 + C190 — Entradas & Saídas
+Extrai registros C100/C170 com NCM/CEST do 0200 (Entradas e Saídas)
+e C190 consolidado (apenas Saídas), gerando XLSX formatado.
 """
 # ─── AUTO-INSTALL ────────────────────────────────────────────────────────────
 import subprocess, sys
@@ -44,13 +44,23 @@ C170_FIELDS = [
     "VL_COFINS", "COD_CTA", "VL_ABAT_NT"
 ]
 
+# Registro C190 — Consolidação por CST_ICMS, CFOP e ALIQ_ICMS
+# |C190|CST_ICMS|CFOP|ALIQ_ICMS|VL_OPR|VL_BC_ICMS|VL_ICMS|VL_BC_ICMS_ST|VL_ICMS_ST|VL_RED_BC|VL_IPI|COD_OBS|
+C190_FIELDS = [
+    "REG", "CST_ICMS", "CFOP", "ALIQ_ICMS", "VL_OPR", "VL_BC_ICMS",
+    "VL_ICMS", "VL_BC_ICMS_ST", "VL_ICMS_ST", "VL_RED_BC", "VL_IPI", "COD_OBS"
+]
+
 N_C100 = len(C100_FIELDS)
 N_C170 = len(C170_FIELDS)
+N_C190 = len(C190_FIELDS)
 
-# ─── COLUNAS DE SAÍDA (ordem exata solicitada) ──────────────────────────────
+# ─── ÍNDICES PRÉ-CALCULADOS ─────────────────────────────────────────────────
 _C100_IDX = {f: i for i, f in enumerate(C100_FIELDS)}
 _C170_IDX = {f: i for i, f in enumerate(C170_FIELDS)}
+_C190_IDX = {f: i for i, f in enumerate(C190_FIELDS)}
 
+# ─── COLUNAS DE SAÍDA — ENTRADAS / SAÍDAS (C100+C170+0200) ──────────────────
 OUTPUT_COLUMNS = [
     ("NUM_DOC",     "c100", _C100_IDX["NUM_DOC"]),
     ("COD_ITEM",    "c170", _C170_IDX["COD_ITEM"]),
@@ -65,12 +75,43 @@ OUTPUT_COLUMNS = [
     ("VL_ICMS",     "c170", _C170_IDX["VL_ICMS"]),
 ]
 
-HEADERS    = [h for h, _, _ in OUTPUT_COLUMNS]
-N_OUTPUT   = len(OUTPUT_COLUMNS)
+HEADERS  = [h for h, _, _ in OUTPUT_COLUMNS]
+N_OUTPUT = len(OUTPUT_COLUMNS)
+
 COL_WIDTHS = {
     "NUM_DOC": 14, "COD_ITEM": 16, "DESCR_COMPL": 40, "NCM": 14,
     "CEST": 14, "VL_ITEM": 15, "CST_ICMS": 12, "CFOP": 10,
     "VL_BC_ICMS": 15, "ALIQ_ICMS": 13, "VL_ICMS": 15,
+}
+
+# ─── COLUNAS DE SAÍDA — C190 SAÍDAS ─────────────────────────────────────────
+# Contexto do C100 pai + todos os campos do C190 (exceto REG)
+C190_OUTPUT = [
+    ("NUM_DOC",      "c100", _C100_IDX["NUM_DOC"]),
+    ("DT_DOC",       "c100", _C100_IDX["DT_DOC"]),
+    ("COD_PART",     "c100", _C100_IDX["COD_PART"]),
+    ("VL_DOC",       "c100", _C100_IDX["VL_DOC"]),
+    ("CST_ICMS",     "c190", _C190_IDX["CST_ICMS"]),
+    ("CFOP",         "c190", _C190_IDX["CFOP"]),
+    ("ALIQ_ICMS",    "c190", _C190_IDX["ALIQ_ICMS"]),
+    ("VL_OPR",       "c190", _C190_IDX["VL_OPR"]),
+    ("VL_BC_ICMS",   "c190", _C190_IDX["VL_BC_ICMS"]),
+    ("VL_ICMS",      "c190", _C190_IDX["VL_ICMS"]),
+    ("VL_BC_ICMS_ST","c190", _C190_IDX["VL_BC_ICMS_ST"]),
+    ("VL_ICMS_ST",   "c190", _C190_IDX["VL_ICMS_ST"]),
+    ("VL_RED_BC",    "c190", _C190_IDX["VL_RED_BC"]),
+    ("VL_IPI",       "c190", _C190_IDX["VL_IPI"]),
+    ("COD_OBS",      "c190", _C190_IDX["COD_OBS"]),
+]
+
+C190_HEADERS = [h for h, _, _ in C190_OUTPUT]
+N_C190_OUT   = len(C190_OUTPUT)
+
+C190_COL_WIDTHS = {
+    "NUM_DOC": 14, "DT_DOC": 12, "COD_PART": 18, "VL_DOC": 16,
+    "CST_ICMS": 12, "CFOP": 10, "ALIQ_ICMS": 13, "VL_OPR": 16,
+    "VL_BC_ICMS": 15, "VL_ICMS": 15, "VL_BC_ICMS_ST": 16,
+    "VL_ICMS_ST": 15, "VL_RED_BC": 15, "VL_IPI": 14, "COD_OBS": 14,
 }
 
 
@@ -83,7 +124,7 @@ def parse_efd_bytes(raw: bytes) -> dict:
 
     lines = text.splitlines()
 
-    # Fase 1: indexar 0200
+    # ── Fase 1: indexar 0200 ─────────────────────────────────────────────
     lookup_0200: dict[str, tuple[str, str]] = {}
     for line in lines:
         if "|0200|" not in line:
@@ -104,17 +145,19 @@ def parse_efd_bytes(raw: bytes) -> dict:
         if cod:
             lookup_0200[cod] = (ncm, cest)
 
-    # Fase 2: C100 + C170
-    entradas = []
-    saidas   = []
+    # ── Fase 2: C100 + C170 + C190 ──────────────────────────────────────
+    entradas     = []
+    saidas       = []
+    saidas_c190  = []   # lista de (c100, c190)
     current_c100  = None
     current_c170s = []
+    current_c190s = []
     current_oper  = None
     empty_extra   = ("", "")
     cod_item_idx  = _C170_IDX["COD_ITEM"]
 
     def _flush():
-        nonlocal current_c100, current_c170s, current_oper
+        nonlocal current_c100, current_c170s, current_c190s, current_oper
         if current_c100 is None:
             return
         rec = (current_c100, current_c170s)
@@ -122,14 +165,22 @@ def parse_efd_bytes(raw: bytes) -> dict:
             entradas.append(rec)
         elif current_oper == "1":
             saidas.append(rec)
+            for c190 in current_c190s:
+                saidas_c190.append((current_c100, c190))
         current_c100  = None
         current_c170s = []
+        current_c190s = []
         current_oper  = None
 
     for line in lines:
         stripped = line.strip()
-        if not stripped or "|C1" not in stripped:
+        if not stripped:
             continue
+
+        # Filtro rápido: só processa linhas com C1 ou C19
+        if "|C1" not in stripped:
+            continue
+
         if stripped[0] == "|":
             stripped = stripped[1:]
         if stripped[-1] == "|":
@@ -154,12 +205,19 @@ def parse_efd_bytes(raw: bytes) -> dict:
             extra = lookup_0200.get(cod_item, empty_extra)
             current_c170s.append((c170, extra))
 
+        elif reg == "C190" and current_c100 is not None:
+            c190 = parts[:N_C190]
+            while len(c190) < N_C190:
+                c190.append("")
+            current_c190s.append(c190)
+
     _flush()
 
     return {
-        "entradas":   entradas,
-        "saidas":     saidas,
-        "itens_0200": len(lookup_0200),
+        "entradas":    entradas,
+        "saidas":      saidas,
+        "saidas_c190": saidas_c190,
+        "itens_0200":  len(lookup_0200),
     }
 
 
@@ -203,27 +261,37 @@ def extract_file_from_upload(uploaded) -> bytes | None:
         return raw
 
 
-# ─── GERADOR XLSX (MODO NORMAL — COMPATIBILIDADE TOTAL) ─────────────────────
+# ─── GERADOR XLSX ────────────────────────────────────────────────────────────
 def build_xlsx(data: dict) -> bytes:
     from openpyxl import Workbook
-    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side, NamedStyle
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
     from openpyxl.utils import get_column_letter
 
-    # Estilos pré-criados
+    # Estilos compartilhados
     thin       = Side(style="thin", color="999999")
     border_all = Border(left=thin, right=thin, top=thin, bottom=thin)
-    font_h     = Font(name="Arial", bold=True, color="FFFFFF", size=10)
-    fill_h     = PatternFill("solid", fgColor="1F4E79")
     align_c    = Alignment(horizontal="center", vertical="center")
     align_l    = Alignment(horizontal="left",   vertical="center")
     font_d     = Font(name="Arial", size=9)
     fill_z     = PatternFill("solid", fgColor="F2F7FB")
     fill_w     = PatternFill("solid", fgColor="FFFFFF")
 
+    # Cabeçalhos por aba
+    FILL_HEADER = {
+        "ENTRADAS":    PatternFill("solid", fgColor="1F4E79"),
+        "SAÍDAS":      PatternFill("solid", fgColor="1F4E79"),
+        "C190 SAÍDAS": PatternFill("solid", fgColor="6B21A8"),
+    }
+    font_h = Font(name="Arial", bold=True, color="FFFFFF", size=10)
+
     wb = Workbook()
-    # Remove a sheet padrão criada automaticamente
     wb.remove(wb.active)
 
+    # ── Helper: aplica estilo numa célula ────────────────────────────────
+    def _style(cell, font, fill, align):
+        cell.font, cell.fill, cell.alignment, cell.border = font, fill, align, border_all
+
+    # ── Aba ENTRADAS / SAÍDAS (C100+C170+0200) ──────────────────────────
     def _extract_row(c100, c170, extra):
         row = []
         for _, origem, idx in OUTPUT_COLUMNS:
@@ -235,19 +303,17 @@ def build_xlsx(data: dict) -> bytes:
                 row.append(extra[idx])
         return row
 
-    def write_sheet(title: str, records: list):
-        ws = wb.create_sheet(title=title)
+    def write_c170_sheet(title: str, records: list):
+        ws      = wb.create_sheet(title=title)
+        fill_hd = FILL_HEADER[title]
 
-        # ── Cabeçalho ────────────────────────────────────────────────────
+        # Cabeçalho
         for col_idx, h in enumerate(HEADERS, 1):
             cell = ws.cell(row=1, column=col_idx, value=h)
-            cell.font      = font_h
-            cell.fill       = fill_h
-            cell.alignment  = align_c
-            cell.border     = border_all
+            _style(cell, font_h, fill_hd, align_c)
 
-        # ── Dados ────────────────────────────────────────────────────────
-        row_num = 1  # linha 1 é o cabeçalho
+        # Dados
+        row_num = 1
         for c100, c170s in records:
             if not c170s:
                 continue
@@ -257,28 +323,63 @@ def build_xlsx(data: dict) -> bytes:
                 vals = _extract_row(c100, c170, extra)
                 for col_idx, val in enumerate(vals, 1):
                     cell = ws.cell(row=row_num, column=col_idx, value=val)
-                    cell.font      = font_d
-                    cell.fill       = fill
-                    cell.alignment  = align_l if HEADERS[col_idx - 1] == "DESCR_COMPL" else align_c
-                    cell.border     = border_all
+                    al = align_l if HEADERS[col_idx - 1] == "DESCR_COMPL" else align_c
+                    _style(cell, font_d, fill, al)
 
         if row_num == 1:
             cell = ws.cell(row=2, column=1, value=f"Nenhum registro de {title} encontrado.")
             cell.font = Font(name="Arial", bold=True, size=11, color="CC0000")
 
-        # ── Larguras ─────────────────────────────────────────────────────
+        # Larguras
         for col_idx, h in enumerate(HEADERS, 1):
             ws.column_dimensions[get_column_letter(col_idx)].width = COL_WIDTHS.get(h, 12)
 
-        # ── Congelar cabeçalho ───────────────────────────────────────────
+        # Congelar cabeçalho + autofiltro
         ws.freeze_panes = "A2"
-
-        # ── Autofiltro ───────────────────────────────────────────────────
         if row_num > 1:
             ws.auto_filter.ref = f"A1:{get_column_letter(N_OUTPUT)}{row_num}"
 
-    write_sheet("ENTRADAS", data["entradas"])
-    write_sheet("SAÍDAS",   data["saidas"])
+    # ── Aba C190 SAÍDAS ─────────────────────────────────────────────────
+    def write_c190_sheet(saidas_c190: list):
+        title   = "C190 SAÍDAS"
+        ws      = wb.create_sheet(title=title)
+        fill_hd = FILL_HEADER[title]
+
+        # Cabeçalho
+        for col_idx, h in enumerate(C190_HEADERS, 1):
+            cell = ws.cell(row=1, column=col_idx, value=h)
+            _style(cell, font_h, fill_hd, align_c)
+
+        # Dados
+        row_num = 1
+        for c100, c190 in saidas_c190:
+            row_num += 1
+            fill = fill_z if row_num % 2 == 0 else fill_w
+            for col_idx, (_, origem, idx) in enumerate(C190_OUTPUT, 1):
+                if origem == "c100":
+                    val = c100[idx]
+                else:
+                    val = c190[idx]
+                cell = ws.cell(row=row_num, column=col_idx, value=val)
+                _style(cell, font_d, fill, align_c)
+
+        if row_num == 1:
+            cell = ws.cell(row=2, column=1, value="Nenhum registro C190 de saída encontrado.")
+            cell.font = Font(name="Arial", bold=True, size=11, color="CC0000")
+
+        # Larguras
+        for col_idx, h in enumerate(C190_HEADERS, 1):
+            ws.column_dimensions[get_column_letter(col_idx)].width = C190_COL_WIDTHS.get(h, 12)
+
+        # Congelar cabeçalho + autofiltro
+        ws.freeze_panes = "A2"
+        if row_num > 1:
+            ws.auto_filter.ref = f"A1:{get_column_letter(N_C190_OUT)}{row_num}"
+
+    # ── Gera as 3 abas ──────────────────────────────────────────────────
+    write_c170_sheet("ENTRADAS", data["entradas"])
+    write_c170_sheet("SAÍDAS",   data["saidas"])
+    write_c190_sheet(data["saidas_c190"])
 
     buf = io.BytesIO()
     wb.save(buf)
@@ -308,23 +409,24 @@ def count_records(raw: bytes) -> dict:
         text = raw.decode("latin-1")
     except Exception:
         text = raw.decode("utf-8", errors="replace")
-    c100 = c170 = r0200 = 0
+    c100 = c170 = c190 = r0200 = 0
     for line in text.splitlines():
         s = line.strip()
         if   s.startswith("|C100|"): c100  += 1
         elif s.startswith("|C170|"): c170  += 1
+        elif s.startswith("|C190|"): c190  += 1
         elif s.startswith("|0200|"): r0200 += 1
-    return {"C100": c100, "C170": c170, "0200": r0200}
+    return {"C100": c100, "C170": c170, "C190": c190, "0200": r0200}
 
 
 # ─── UI STREAMLIT ────────────────────────────────────────────────────────────
 def main():
-    st.set_page_config(page_title="EFD Extrator C100+C170", page_icon="📊", layout="wide")
+    st.set_page_config(page_title="EFD Extrator C100+C170+C190", page_icon="📊", layout="wide")
 
     st.markdown("""
     <style>
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
-    .main .block-container { max-width: 900px; padding-top: 2rem; }
+    .main .block-container { max-width: 960px; padding-top: 2rem; }
     .hero-title {
         font-family: 'Inter', sans-serif; font-size: 2rem; font-weight: 700;
         color: #1F4E79; text-align: center; margin-bottom: 0.2rem;
@@ -339,7 +441,7 @@ def main():
         padding: 1.2rem; text-align: center;
     }
     .stat-card h3 {
-        font-family: 'Inter', sans-serif; font-size: 1.8rem;
+        font-family: 'Inter', sans-serif; font-size: 1.6rem;
         font-weight: 700; color: #1F4E79; margin: 0;
     }
     .stat-card p {
@@ -368,7 +470,7 @@ def main():
     </style>
     """, unsafe_allow_html=True)
 
-    st.markdown('<div class="hero-title">📊 EFD Extrator C100 + C170</div>', unsafe_allow_html=True)
+    st.markdown('<div class="hero-title">📊 EFD Extrator C100 + C170 + C190</div>', unsafe_allow_html=True)
     st.markdown('<div class="hero-sub">Extraia registros de Notas Fiscais do seu SPED em segundos</div>', unsafe_allow_html=True)
 
     st.markdown("""
@@ -377,6 +479,7 @@ def main():
         <span class="info-badge">EFD Contribuições</span>
         <span class="info-badge">TXT • ZIP • RAR</span>
         <span class="info-badge">NCM + CEST (0200)</span>
+        <span class="info-badge">C190 Saídas</span>
     </div>
     """, unsafe_allow_html=True)
 
@@ -400,7 +503,7 @@ def main():
         file_size_mb = len(raw) / (1024 * 1024)
         tipo_label   = "ICMS/IPI" if "/" in efd_type else efd_type.split()[-1]
 
-        c1, c2, c3, c4, c5 = st.columns(5)
+        c1, c2, c3, c4, c5, c6 = st.columns(6)
         with c1:
             st.markdown(f'<div class="stat-card"><h3>{tipo_label}</h3><p>Tipo EFD</p></div>', unsafe_allow_html=True)
         with c2:
@@ -408,8 +511,10 @@ def main():
         with c3:
             st.markdown(f'<div class="stat-card"><h3>{counts["C170"]:,}</h3><p>Registros C170</p></div>', unsafe_allow_html=True)
         with c4:
-            st.markdown(f'<div class="stat-card"><h3>{counts["0200"]:,}</h3><p>Itens (0200)</p></div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="stat-card"><h3>{counts["C190"]:,}</h3><p>Registros C190</p></div>', unsafe_allow_html=True)
         with c5:
+            st.markdown(f'<div class="stat-card"><h3>{counts["0200"]:,}</h3><p>Itens (0200)</p></div>', unsafe_allow_html=True)
+        with c6:
             st.markdown(f'<div class="stat-card"><h3>{file_size_mb:.1f} MB</h3><p>Tamanho</p></div>', unsafe_allow_html=True)
 
         if counts["C100"] == 0:
@@ -428,6 +533,7 @@ def main():
             n_sai       = len(data["saidas"])
             n_itens_ent = sum(len(c170s) for _, c170s in data["entradas"])
             n_itens_sai = sum(len(c170s) for _, c170s in data["saidas"])
+            n_c190_sai  = len(data["saidas_c190"])
 
             with st.spinner("Gerando planilha XLSX..."):
                 xlsx_bytes = build_xlsx(data)
@@ -436,7 +542,7 @@ def main():
 
             st.success(f"✅ Processado em {elapsed:.1f}s — {data['itens_0200']:,} itens no cadastro 0200")
 
-            col_e, col_s = st.columns(2)
+            col_e, col_s, col_c = st.columns(3)
             with col_e:
                 st.markdown(f"""
                 <div class="stat-card" style="border-left: 4px solid #16a34a;">
@@ -451,11 +557,18 @@ def main():
                     <p>Notas de Saída</p>
                     <p style="font-size:0.75rem; color:#94a3b8;">{n_itens_sai:,} itens (C170)</p>
                 </div>""", unsafe_allow_html=True)
+            with col_c:
+                st.markdown(f"""
+                <div class="stat-card" style="border-left: 4px solid #6B21A8;">
+                    <h3 style="color:#6B21A8;">{n_c190_sai}</h3>
+                    <p>C190 Saídas</p>
+                    <p style="font-size:0.75rem; color:#94a3b8;">Consolidação ICMS</p>
+                </div>""", unsafe_allow_html=True)
 
             st.markdown("<br>", unsafe_allow_html=True)
 
             base_name   = Path(uploaded.name).stem
-            output_name = f"{base_name}_C100_C170.xlsx"
+            output_name = f"{base_name}_C100_C170_C190.xlsx"
 
             st.download_button(
                 label=f"📥 Baixar {output_name}",
